@@ -1,16 +1,14 @@
-# Respostas do Template — Relatório Projeto: Modelos Generativos para Imagens
+# Respostas do Template: Relatório Projeto, Modelos Generativos para Imagens
 
-Este documento reproduz integralmente os campos das 4 páginas do PDF
-`template-relatorio-projeto.pdf` e preenche os campos aplicáveis ao projeto
-DeepCache. A página 4 do PDF está em branco.
+Este documento preenche os campos do `template-relatorio-projeto.pdf` para o projeto DeepCache. O trabalho foi desenvolvido individualmente, com um único autor. Os marcadores `[PREENCHER APÓS EXECUÇÃO NO COLAB]` indicam os campos que dependem da execução do notebook `notebooks/projeto_deepcache_colab.ipynb` na GPU T4.
 
 ---
 
 ## Cabeçalho
 
-- **Estudantes:** [Nome Completo dos Estudantes]
-- **Data:** [DD/MM/AAAA]
-- **Link do Código:** [GitHub / Google Colab]
+- **Estudante (projeto individual):** [Nome Completo]
+- **Data:** [PREENCHER APÓS EXECUÇÃO NO COLAB]
+- **Link do Código:** [URL do repositório GitHub] / [URL do notebook no Google Colab]
 
 ---
 
@@ -33,8 +31,8 @@ DeepCache. A página 4 do PDF está em branco.
 
 ## Objetivo do artigo em 2 linhas
 
-DeepCache resolve o alto custo computacional da inferência iterativa da U-Net em modelos de difusão, cacheando e reutilizando features de alta resolução que mudam lentamente entre passos consecutivos de remoção de ruído, sem retreinamento.  
-O artigo avalia Stable Diffusion em prompts do PartiPrompts e MS-COCO 2017, além de modelos LDM no ImageNet; o projeto desta entrega usa geração Text-to-Image com Stable Diffusion 1.5.
+DeepCache reduz o custo da inferência iterativa da U-Net em modelos de difusão. Ele reaproveita features de alta resolução que mudam pouco entre passos consecutivos de remoção de ruído, sem retreinar o modelo.
+O artigo avalia Stable Diffusion com prompts do PartiPrompts e do MS-COCO 2017, além de LDM no ImageNet. Este projeto usa Text-to-Image com Stable Diffusion 1.5 e 5 prompts oficiais.
 
 ---
 
@@ -44,53 +42,43 @@ O artigo avalia Stable Diffusion em prompts do PartiPrompts e MS-COCO 2017, alé
 
 - **Plataforma:** [X] Google Colab
 - **Acelerador / VRAM:** NVIDIA Tesla T4, 15 GB
-- **Framework e bibliotecas importantes:** Python 3, PyTorch 2.x, Diffusers, Transformers, Accelerate, DeepCache, LPIPS e TorchMetrics
+- **Framework e bibliotecas:** Python 3.x, PyTorch (versão do runtime do Colab), Diffusers 0.43.x, Transformers 5.x, DeepCache 0.1.1, LPIPS e TorchMetrics. As versões exatas são impressas pelo Bloco 1 do notebook.
 
 ## Uso do código original
 
 - [ ] Código executou sem problemas.
-- [X] Código precisou de ajustes de dependências/caminhos.
+- [X] Código precisou de ajustes de dependências/caminhos: o notebook embute os 5 prompts oficiais e valida o scheduler, sem depender de clonar o repositório.
 - [ ] Não executou por erro crítico.
 
-**Ajustes previstos:**
+**Configuração do experimento:**
 
-1. Instalar o pacote `DeepCache` no ambiente do Colab.
-2. Instalar uma versão do Diffusers compatível com o código do helper oficial.
-3. Carregar `runwayml/stable-diffusion-v1-5` em `torch.float16`.
-4. Utilizar o scheduler DDIM e fixar o gerador aleatório em `seed=42`.
-5. Aplicar slicing de atenção e VAE para manter a geração dentro dos 15 GB da T4.
-6. Medir tempo somente em volta da chamada `pipe(...)`, com `torch.cuda.synchronize()`.
+- Modelo: `runwayml/stable-diffusion-v1-5`, float16, atenção fatiada (`attention slicing = max`).
+- Scheduler: PLMS, implementado como `PNDMScheduler(skip_prk_steps=True)` com 50 passos. Antes de cada medição, o notebook valida que não há timesteps duplicados. Se houver, troca para `LMSDiscreteScheduler`, que é o fallback. [PREENCHER APÓS EXECUÇÃO NO COLAB: scheduler usado, impresso pelo Bloco 3]
+- Guidance 7.5, resolução 512×512, seed 42, mesmos passos para as três versões.
+- DeepCache oficial: `DeepCacheSDHelper`, `cache_interval=3`, `cache_branch_id=0`.
 
-**Execução da base pública:**
+**Execução do baseline oficial:**
 
 ```python
-import torch
-from diffusers import StableDiffusionPipeline, DDIMScheduler
 from DeepCache import DeepCacheSDHelper
-
-pipe = StableDiffusionPipeline.from_pretrained(
-    "runwayml/stable-diffusion-v1-5",
-    torch_dtype=torch.float16,
-).to("cuda")
-pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 
 helper = DeepCacheSDHelper(pipe=pipe)
 helper.set_params(cache_interval=3, cache_branch_id=0)
+
 helper.enable()
-images = pipe(
-    prompt,
-    num_inference_steps=50,
-    generator=torch.Generator("cuda").manual_seed(42),
-).images
-helper.disable()
+try:
+    image = pipe(prompt=prompt, num_inference_steps=50, guidance_scale=7.5,
+                 generator=torch.Generator('cuda').manual_seed(42)).images[0]
+finally:
+    helper.disable()
 ```
 
-No modo baseline, o helper permanece desativado. No modo DeepCache oficial, `cache_interval=3` atualiza o cache periodicamente e `cache_branch_id=0` seleciona o ramo inicial da U-Net. Todo prompt será processado nas três versões com os mesmos passos, resoluções, seed e escala de orientação.
+Sem cache, o helper permanece desativado. Com `cache_interval=3`, a U-Net completa é calculada nos passos cujo índice é múltiplo de 3 (17 passos de 50). Nos demais, os blocos reutilizam a saída do passo anterior.
 
 ## Uso de pesos
 
 - [X] Checkpoint pré-treinado oficial: `runwayml/stable-diffusion-v1-5`
-- [ ] Treinado do zero: [X épocas]
+- [ ] Treinado do zero: não aplicável. Nenhum treinamento foi feito.
 
 ---
 
@@ -98,58 +86,109 @@ No modo baseline, o helper permanece desativado. No modo DeepCache oficial, `cac
 
 ## Hipótese da modificação
 
-A substituição do intervalo fixo $N$ por um gatilho adaptativo pode reduzir ou aumentar a frequência de atualização da U-Net conforme a mudança real do latent. A hipótese é que latents que variam pouco permitam reutilizar o cache por mais passos, mantendo qualidade próxima ao baseline, enquanto mudanças maiores provocam atualização completa do ramo cacheado antes de haver perda acumulada.
+O intervalo fixo `cache_interval` atualiza o cache no mesmo ritmo para todos os prompts. A hipótese é que o gatilho adaptativo, baseado na mudança real do latent, reaproveita o cache por mais passos quando o latent muda pouco e atualiza com mais frequência quando muda muito. Assim, a qualidade fica próxima do DeepCache oficial e a economia de passos completos aumenta.
 
 ## O que foi alterado
 
-- O comportamento original `step % cache_interval == 0` foi substituído por uma decisão adaptativa.
-- Em cada etapa, calcula-se a distância relativa L2:
-
-$$
-d_t =
-\frac{\left\|z_t-z_{t_{\text{last}}}\right\|_2}
-{\left\|z_{t_{\text{last}}}\right\|_2+\epsilon}
-$$
-
-- O cache é atualizado somente quando $d_t>\tau$.
-- `cache_branch_id=0` continua fixo, assim a intervenção modifica somente a política de atualização do cache.
-- Não se alteram os pesos, o scheduler DDIM, o sampler, o prompt, a resolução ou o número de passos.
+- A decisão de atualização do cache do `DeepCacheSDHelper` foi substituída. O método `is_skip_step` original usa um intervalo fixo. A versão adaptativa força o cálculo completo quando `refresh=True` e delega ao método original nos demais passos.
+- Em cada fim de passo, um callback calcula a distância relativa L2 entre o latent atual e o último latent recalculado, e define `refresh` para a próxima chamada da U-Net.
+- Não se alteram os pesos, o scheduler, o sampler, os prompts, a resolução, o número de passos nem a seed.
 
 ## Motivação teórica
 
-O intervalo fixo presume que toda imagem percorre o processo de denoising com a mesma velocidade de mudança. Essa suposição pode ser conservadora ou agressiva conforme a etapa e o prompt. Medir a mudança do latent aproxima o gatilho da dinâmica real da geração e pode evitar atualizações redundantes em regiões lentas ou atrasar o cache quando a representação varia rapidamente.
+O artigo mostra que as features de alta resolução da U-Net mudam pouco entre passos consecutivos. Essa mudança depende do prompt e da etapa do denoising. Medir a variação do latent aproxima o gatilho da dinâmica real da geração, em vez de assumir uma periodicidade fixa.
 
 ## Resultado esperado
 
-- Espera-se reduzir parte da latência do DeepCache oficial ou manter um speedup comparável.
-- Espera-se qualidade visual próxima ao SD sem cache e ao DeepCache oficial.
-- Espera-se manter ou reduzir o pico de VRAM em relação ao baseline.
-- O teste é considerado positivo se houver speedup mensurável sem perda relevante de CLIP Score e LPIPS.
+- Economia de passos completos da U-Net em relação ao DeepCache oficial, com latência menor ou comparável.
+- Qualidade próxima ao Stable Diffusion sem cache, medida por CLIP Score e LPIPS.
+- Pico de VRAM igual ou menor que o do baseline.
+- O teste é positivo se houver redução mensurável de passos ou latência, sem queda relevante de CLIP Score.
 
-## Trecho de Código Modificado — Code Diff
+## Trecho de Código Modificado (Code Diff)
 
-**Arquivo alterado:** `notebooks/projeto_deepcache_colab.ipynb`
+**Arquivo alterado:** `notebooks/projeto_deepcache_colab.ipynb`, Bloco 4 (`deepcache-adaptive`) e Bloco 5 (`calibracao`).
 
-### Código original (BEFORE)
-
-```python
-def should_update_cache(step):
-    return step % cache_interval == 0
-```
-
-### Código modificado (AFTER)
+### Código original (BEFORE): `DeepCacheSDHelper.is_skip_step` no pacote oficial `DeepCache` 0.1.1
 
 ```python
-relative_l2 = torch.linalg.vector_norm(
-    z_t.float() - z_last.float()
-) / (torch.linalg.vector_norm(z_last.float()) + 1e-8)
-
-should_update_cache = relative_l2.item() > tau
+def is_skip_step(self, block_i, layer_i, blocktype = "down"):
+    self.start_timestep = self.cur_timestep if self.start_timestep is None else self.start_timestep
+    cache_interval, cache_layer_id, cache_block_id, skip_mode = \
+        self.params['cache_interval'], self.params['cache_layer_id'], self.params['cache_block_id'], self.params['skip_mode']
+    if skip_mode == 'uniform':
+        if (self.cur_timestep-self.start_timestep) % cache_interval == 0: return False
+    if block_i > cache_block_id or blocktype == 'mid':
+        return True
+    if block_i < cache_block_id: return False
+    return layer_i >= cache_layer_id if blocktype == 'down' else layer_i > cache_layer_id
 ```
 
-## Explicação da mudança no código em uma linha
+A decisão é tomada por `cur_timestep`, o índice do timestep no scheduler. O método é chamado por `wrap_block_forward` em cada bloco e em cada passo.
 
-O hook substitui a periodicidade fixa por atualização completa da U-Net somente quando a distância relativa L2 entre latents consecutivos ultrapassa o limiar $\tau$.
+### Código modificado (AFTER): subclasse adaptativa e callback
+
+```python
+class AdaptiveDeepCacheSDHelper(DeepCacheSDHelper):
+    def __init__(self, pipe=None, tau=None):
+        super().__init__(pipe=pipe)
+        self.tau = tau
+
+    def reset_states(self):
+        super().reset_states()
+        self.refresh = True
+        self.ref_latent = None
+        self.distances = []
+        self.called_steps = set()
+        self.full_steps = set()
+
+    def is_skip_step(self, block_i, layer_i, blocktype='down'):
+        if self.tau is None:
+            skip = super().is_skip_step(block_i, layer_i, blocktype)
+        elif self.refresh:
+            skip = False
+        else:
+            skip = super().is_skip_step(block_i, layer_i, blocktype)
+
+        if block_i == 0 and layer_i == 0 and blocktype == 'down':
+            self.called_steps.add(self.cur_timestep)
+            if not skip:
+                self.full_steps.add(self.cur_timestep)
+        return skip
+
+
+def make_adaptive_callback(helper):
+    def _on_step_end(pipe, step, timestep, callback_kwargs):
+        z = callback_kwargs['latents'].detach().float()
+        if helper.ref_latent is None:
+            distance = float('inf')
+        else:
+            distance = (
+                torch.linalg.vector_norm(z - helper.ref_latent)
+                / (torch.linalg.vector_norm(helper.ref_latent) + 1e-8)
+            ).item()
+        helper.distances.append(distance)
+        helper.refresh = distance > helper.tau
+        if helper.refresh:
+            helper.ref_latent = z.clone()
+        return callback_kwargs
+    return _on_step_end
+```
+
+Chamada: `kwargs['callback_on_step_end'] = make_adaptive_callback(helper)` e `kwargs['callback_on_step_end_tensor_inputs'] = ['latents']`.
+
+**Explicação da mudança no código (1 linha):** a U-Net só é recalculada por inteiro quando a distância relativa L2 entre latents supera `tau`, e a decisão vale para o passo seguinte.
+
+**Limitação conhecida:** o primeiro passo não tem latent de referência, então o passo 1 também é recalculado por inteiro. A contagem de passos completos inclui esse passo.
+
+## Escolha e calibração do limiar tau
+
+- **Candidatos:** tau ∈ {0,015; 0,020; 0,030}.
+- **Prompts de calibração (exclusivos):** 3 prompts que não aparecem na avaliação final, listados no Bloco 2 do notebook.
+- **Critério:** entre os candidatos com queda de CLIP Score de no máximo 0,01 em relação ao Stable Diffusion sem cache nos prompts de calibração, escolhe-se o que economiza mais passos completos. Se nenhum atender, escolhe-se o de menor queda.
+- **Avaliação final:** o tau escolhido roda nos 5 prompts oficiais de `data/prompts_geracao.txt`, que estão embutidos no notebook com `assert len(OFFICIAL_PROMPTS) == 5`.
+- **Tabela de calibração:** [PREENCHER APÓS EXECUÇÃO NO COLAB: copiar a tabela impressa pelo Bloco 5]
+- **tau escolhido:** [PREENCHER APÓS EXECUÇÃO NO COLAB: valor impresso pelo Bloco 5]
 
 ---
 
@@ -157,47 +196,31 @@ O hook substitui a periodicidade fixa por atualização completa da U-Net soment
 
 ## Comparativo Visual
 
-| Prompt | Sem Cache — Stable Diffusion | DeepCache Oficial | DeepCache Adaptativo |
+| Prompt | Sem Cache (Stable Diffusion) | DeepCache Oficial | DeepCache Adaptativo |
 |---|---|---|---|
-| 1 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 2 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 3 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 4 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 5 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 6 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 7 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 8 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 9 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
-| 10 | [Inserir imagem] | [Inserir imagem] | [Inserir imagem] |
+| 1 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
+| 2 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
+| 3 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
+| 4 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
+| 5 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
 
-**Arquivo gerado pelo notebook:** `deepcache-experiment/results/comparacao_visual.png`
+**Arquivo gerado pelo notebook:** `results/comparacao_visual.png` (Bloco 7). Para inserir as imagens, use os arquivos `results/prompt_XX_sem_cache.png`, `results/prompt_XX_deepcache_oficial.png` e `results/prompt_XX_deepcache_adaptativo.png`.
 
 ## Análise Visual
 
-[Comparar nitidez, textura, consistência com o prompt, variedade de composição, ruído e artefatos entre Stable Diffusion sem cache, DeepCache oficial e DeepCache adaptativo. Mencionar apenas diferenças observadas nas imagens geradas.]
+[PREENCHER APÓS EXECUÇÃO NO COLAB: comparar nitidez, textura, aderência ao prompt, ruído e artefatos entre as três versões. Descrever só o que aparece nas imagens geradas.]
 
 ## Métricas e Desempenho
 
-| Método | Latência média por imagem (s) | Speedup | Pico de VRAM (MB) | CLIP Score médio | LPIPS médio versus sem cache |
-|---|---:|---:|---:|---:|---:|
-| Stable Diffusion sem cache | [_____] | 1.00x | [_____] | [_____] | 0.000 |
-| DeepCache oficial | [_____] | [_____]x | [_____] | [_____] | [_____] |
-| DeepCache adaptativo | [_____] | [_____]x | [_____] | [_____] | [_____] |
+**Onde colar:** copiar a tabela impressa pelo Bloco 7 do notebook (também salva em `results/tabela_resultados.md`) no lugar da tabela abaixo.
 
-### Métricas por prompt
+| Método | Latência média (s) | Speedup | Pico de VRAM (MB) | Passos completos executados (de 50) | CLIP Score médio | LPIPS médio vs. sem cache |
+|---|---:|---:|---:|---:|---:|---:|
+| Stable Diffusion sem cache | [PREENCHER APÓS EXECUÇÃO NO COLAB] | 1,00x | [PREENCHER APÓS EXECUÇÃO NO COLAB] | 50 | [PREENCHER APÓS EXECUÇÃO NO COLAB] | 0,0000 |
+| DeepCache oficial | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
+| DeepCache adaptativo (tau escolhido) | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] | [PREENCHER APÓS EXECUÇÃO NO COLAB] |
 
-| Prompt | Latência sem cache (s) | Latência oficial (s) | Latência adaptativa (s) | Speedup oficial | Speedup adaptativo | LPIPS oficial | LPIPS adaptativo | CLIP oficial | CLIP adaptativo |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 2 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 3 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 4 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 5 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 6 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 7 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 8 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 9 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
-| 10 | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] | [_____] |
+**Detalhes por prompt:** `results/metricas_resultados.csv`. **Resumo em JSON, com calibração:** `results/resumo_resultados.json`.
 
 ### A hipótese se confirmou?
 
@@ -205,11 +228,13 @@ O hook substitui a periodicidade fixa por atualização completa da U-Net soment
 - [ ] Parcialmente
 - [ ] Não
 
-**Justificativa curta:** [Preencher com os valores reais do notebook.]
+**Justificativa curta:** [PREENCHER APÓS EXECUÇÃO NO COLAB: citar o número de passos completos economizados, a variação de latência e a queda de CLIP Score e LPIPS, com os valores reais do notebook.]
 
 ---
 
-# 5. Diagnóstico de Falhas e Post-Mortem (Caso NÃO Tenha Gerado Resultados)
+# 5. Diagnóstico de Falhas e Post-Mortem
+
+Preencher esta seção somente se a execução falhar. Se o notebook concluir, marcar como não aplicável.
 
 ## Tipo de Falha Encontrada
 
@@ -217,40 +242,27 @@ O hook substitui a periodicidade fixa por atualização completa da U-Net soment
 - [ ] Limitação de GPU / Memória insuficiente (CUDA Out of Memory)
 - [ ] Instabilidade numérica (Loss virou NaN / Inf)
 - [ ] Colapso do modelo generativo (ruído puro ou imagem inválida)
-- [ ] Outro: [Descreva]
+- [ ] Outro: [PREENCHER APÓS EXECUÇÃO NO COLAB, se houver]
 
 ## Log de Erro ou Evidência Visual da Falha
 
-[Cole aqui o stack trace, mensagem da T4 ou imagem que evidencie a falha.]
+[PREENCHER APÓS EXECUÇÃO NO COLAB, se houver falha.]
 
 ## Causa-Raiz Técnica
 
-[Identifique se a falha foi causada por infraestrutura, incompatibilidade de versões, VRAM ou erro do modelo.]
+[PREENCHER APÓS EXECUÇÃO NO COLAB, se houver falha.]
 
-## O que vocês tentaram para contornar?
+## O que foi tentado para contornar
 
 - [ ] Reduziu batch size / resolução
-- [ ] Alterou learning rate / otimizador
-- [ ] Simplificou camadas / removeu blocos
-- [ ] Reduziu os 50 passos DDIM
-- [ ] Desativou safety checker ou ativou slicing
-- [ ] Outro: [Descreva]
+- [ ] Alterou o scheduler (PNDM para LMS)
+- [ ] Reduziu os passos de inferência
+- [ ] Outro: [PREENCHER APÓS EXECUÇÃO NO COLAB, se houver]
 
-**Resultado das tentativas:** [Comente os resultados.]
-
-**O que seria necessário para viabilizar o experimento:** [Ex.: GPU com maior VRAM, compatibilidade fixa de versões, tempo de execução maior ou menor resolução.]
+**Resultado das tentativas:** [PREENCHER APÓS EXECUÇÃO NO COLAB, se houver falha.]
 
 ---
 
 # 6. Conclusão Rápida
 
-**Principal aprendizado prático:** [Em 1 ou 2 frases, explicar o que a reprodução e a intervenção adaptativa demonstraram sobre aceleração de geração Text-to-Image, qualidade visual e uso da T4.]
-
----
-
-## Inventário das 4 páginas do PDF
-
-1. **Página 1:** cabeçalho, seção 1 e início da seção 2.
-2. **Página 2:** final da seção 2 e seções 3 e início da seção 4.
-3. **Página 3:** final da seção 4, seção 5 e seção 6.
-4. **Página 4:** página em branco.
+**Principal aprendizado prático:** [PREENCHER APÓS EXECUÇÃO NO COLAB: uma ou duas frases sobre o que a reprodução e a intervenção adaptativa mostraram sobre aceleração de Text-to-Image, qualidade visual e uso da T4.]
